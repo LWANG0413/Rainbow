@@ -8,6 +8,15 @@ from torch.nn.utils import clip_grad_norm_
 
 from model import DQN
 
+def kl_dir(alp, beta):
+      alp_0 = alp.sum(1)
+      beta_0 = beta.sum(1)
+      #print(torch.lgamma(beta).sum().size()
+      return torch.lgamma(alp_0) - torch.lgamma(alp).sum(1) -torch.lgamma(beta_0) + torch.lgamma(beta).sum(1) + (
+          (alp - beta)*(torch.digamma(alp) - torch.digamma(alp_0).unsqueeze(1))).sum(1)
+
+
+
 
 class Agent():
   def __init__(self, args, env):
@@ -21,6 +30,7 @@ class Agent():
     self.n = args.multi_step
     self.discount = args.discount
     self.norm_clip = args.norm_clip
+    self.likelihood = args.likelihood
 
     self.online_net = DQN(args, self.action_space).to(device=args.device)
     if args.model:  # Load pretrained model if provided
@@ -63,8 +73,13 @@ class Agent():
     idxs, states, actions, returns, next_states, nonterminals, weights = mem.sample(self.batch_size)
 
     # Calculate current state probabilities (online network noise already sampled)
-    log_ps = self.online_net(states, log=True)  # Log probabilities log p(s_t, ·; θonline)
-    log_ps_a = log_ps[range(self.batch_size), actions]  # log p(s_t, a_t; θonline)
+    #log_ps = self.online_net(states, log=True)  # Log probabilities log p(s_t, ·; θonline)
+    #log_ps_a = log_ps[range(self.batch_size), actions]  # log p(s_t, a_t; θonline)
+
+    score_ps = self.online_net.score(states, log = False)
+    score_ps_a = score_ps[range(self.batch_size), actions]
+
+
 
     with torch.no_grad():
       # Calculate nth next state probabilities
@@ -90,14 +105,20 @@ class Agent():
       offset = torch.linspace(0, ((self.batch_size - 1) * self.atoms), self.batch_size).unsqueeze(1).expand(self.batch_size, self.atoms).to(actions)
       m.view(-1).index_add_(0, (l + offset).view(-1), (pns_a * (u.float() - b)).view(-1))  # m_l = m_l + p(s_t+n, a*)(u - b)
       m.view(-1).index_add_(0, (u + offset).view(-1), (pns_a * (b - l.float())).view(-1))  # m_u = m_u + p(s_t+n, a*)(b - l)
+      # Compute Target Posterior
+      score_target_ps = self.target_net.score(states, log = False)
+      score_target_ps_a = score_target_ps[range(self.batch_size), actions]
+      target_posterior = score_target_ps_a + self.likelihood * m
 
-    loss = -torch.sum(m * log_ps_a, 1)  # Cross-entropy loss (minimises DKL(m||p(s_t, a_t)))
+    #loss1 = -torch.sum(m * log_ps_a, 1)  # Cross-entropy loss (minimises DKL(m||p(s_t, a_t)))
+    loss = kl_dir(target_posterior, score_ps_a)
+    #print(loss1, loss)
     self.online_net.zero_grad()
     (weights * loss).mean().backward()  # Backpropagate importance-weighted minibatch loss
     clip_grad_norm_(self.online_net.parameters(), self.norm_clip)  # Clip gradients by L2 norm
     self.optimiser.step()
-
-    mem.update_priorities(idxs, loss.detach().cpu().numpy())  # Update priorities of sampled transitions
+    mem.update_priorities(idxs, 1)  # Update priorities of sampled transitions
+    #mem.update_priorities(idxs, loss.detach().cpu().numpy())  # Update priorities of sampled transitions
 
   def update_target_net(self):
     self.target_net.load_state_dict(self.online_net.state_dict())

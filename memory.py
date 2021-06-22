@@ -124,6 +124,8 @@ class ReplayMemory():
   def _get_samples_from_segments(self, batch_size, p_total):
     segment_length = p_total / batch_size  # Batch size number of segments, based on sum over all probabilities
     segment_starts = np.arange(batch_size) * segment_length
+
+
     valid = False
     while not valid:
       samples = np.random.uniform(0.0, segment_length, [batch_size]) + segment_starts  # Uniformly sample from within all segments
